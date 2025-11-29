@@ -1,4 +1,3 @@
-```python name=scripts/reactor_swapper.py url=https://github.com/hooman130/ComfyUI-ReActor/blob/41bd6faefc2b2cbdb8a2ee69f8ceb2e41d808ae9/scripts/reactor_swapper.py
 import os
 import shutil
 from typing import List, Union
@@ -1078,4 +1077,3 @@ def swap_face_many(
     else:
         logger.debug("swap_face_many called with model=None; returning original images")
     return result_images
-```
