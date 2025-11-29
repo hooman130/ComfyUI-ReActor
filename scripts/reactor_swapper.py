@@ -450,6 +450,8 @@ def _prepare_source_image(source_img):
 def _pil_to_bgr(img: Image.Image) -> np.ndarray:
     return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 
+# ... existing imports and code above stay unchanged ...
+
 def swap_face(
     source_img: Union[Image.Image, str, None],
     target_img: Image.Image,
@@ -477,7 +479,8 @@ def swap_face(
 
     if model is None:
         logger.debug("No model provided; returning original target image.")
-        return target_img
+        # Back-compat: return placeholders for bbox and swapped indexes
+        return target_img, [], []
 
     source_img = _prepare_source_image(source_img)
     target_bgr = _pil_to_bgr(target_img)
@@ -499,11 +502,11 @@ def swap_face(
         logger.status("Using provided face_model as source.")
     else:
         logger.error("No source image or face_model provided; cannot proceed.")
-        return target_img
+        return target_img, [], []
 
     if source_faces is None or len(source_faces) == 0:
         logger.status("No source faces detected.")
-        return target_img
+        return target_img, [], []
 
     # Target face acquisition
     md5_tgt = get_image_md5hash(target_bgr)
@@ -517,7 +520,7 @@ def swap_face(
 
     if target_faces is None or len(target_faces) == 0:
         logger.status("No target faces detected; skipping.")
-        return target_img
+        return target_img, [], []
 
     # Select initial source face
     src_face, src_wrong_gender = get_face_single(
@@ -527,16 +530,18 @@ def swap_face(
 
     if src_face is None or src_wrong_gender == 1:
         logger.status("Initial source face invalid or wrong gender.")
-        return target_img
+        return target_img, [], []
 
     model_path = _resolve_model_path(model)
     face_swapper = getFaceSwapModel(model_path)
     if face_swapper is None:
         logger.error("Model '%s' could not be loaded.", model_path)
-        return target_img
+        return target_img, [], []
 
     result = target_bgr
     src_face_idx = 0
+    swapped_bboxes: List[List[float]] = []
+    swapped_indices: List[int] = []
 
     for face_num in faces_index:
         logger.debug("Processing target face index: %d", face_num)
@@ -572,38 +577,54 @@ def swap_face(
 
         logger.status("Swapping face index=%d...", face_num)
 
+        swap_success = False
+
         if "hyperswap" in model:
             swapped_256, M = safe_run_hyperswap(face_swapper, src_face, tgt_face, result)
             if swapped_256 is not None:
                 result = paste_back(result, swapped_256, M, crop_size=256)
+                swap_success = True
             else:
                 logger.error("Hyperswap returned None; skipping this face.")
         elif face_boost_enabled:
             fake_face, M = safe_faceswap_get(face_swapper, result, tgt_face, src_face, paste_back=False)
             if fake_face is None:
                 logger.error("Boost mode: face_swapper.get returned None.")
-                continue
-            try:
-                restored_face, scale = restorer.get_restored_face(fake_face, face_restore_model,
-                                                                  face_restore_visibility, codeformer_weight,
-                                                                  interpolation)
-                if M is not None:
-                    M = M * scale if isinstance(M, np.ndarray) else M
-                else:
-                    logger.warning("Boost mode: M is None; in_swap may misalign.")
-                result = swapper.in_swap(result, restored_face, M)
-            except Exception as e:
-                logger.error("Boost restore/swap error: %s", e)
+            else:
+                try:
+                    restored_face, scale = restorer.get_restored_face(fake_face, face_restore_model,
+                                                                      face_restore_visibility, codeformer_weight,
+                                                                      interpolation)
+                    if M is not None:
+                        M = M * scale if isinstance(M, np.ndarray) else M
+                    else:
+                        logger.warning("Boost mode: M is None; in_swap may misalign.")
+                    result = swapper.in_swap(result, restored_face, M)
+                    swap_success = True
+                except Exception as e:
+                    logger.error("Boost restore/swap error: %s", e)
         else:
-            swapped, M_unused = safe_faceswap_get(face_swapper, result, tgt_face, src_face)
-            if swapped is None:
+            swapped_img, _M_unused = safe_faceswap_get(face_swapper, result, tgt_face, src_face)
+            if swapped_img is None:
                 logger.error("Standard swap: model returned None; skipping face.")
-                continue
-            result = swapped  # paste already done internally for inswapper/reswapper
+            else:
+                result = swapped_img  # paste already done internally for inswapper/reswapper
+                swap_success = True
+
+        if swap_success:
+            # Track bbox and index for reporting
+            try:
+                bbox = list(getattr(tgt_face, "bbox", [])) if hasattr(tgt_face, "bbox") else []
+                swapped_bboxes.append(bbox)
+                swapped_indices.append(face_num)
+            except Exception as e:
+                logger.debug("Failed to record bbox/index: %s", e)
 
     final_img = Image.fromarray(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
-    logger.debug("swap_face finished successfully.")
-    return final_img
+    logger.debug("swap_face finished successfully. Swapped indices=%s, bboxes_count=%d",
+                 swapped_indices, len(swapped_bboxes))
+    return final_img, swapped_bboxes, swapped_indices
+
 
 def swap_face_many(
     source_img: Union[Image.Image, str, None],
@@ -629,7 +650,7 @@ def swap_face_many(
 
     if model is None:
         logger.debug("No model provided; returning targets unchanged.")
-        return target_imgs
+        return target_imgs, [[] for _ in target_imgs], [[] for _ in target_imgs]
 
     source_img = _prepare_source_image(source_img)
     target_bgr_list = [cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR) for img in target_imgs]
@@ -653,11 +674,11 @@ def swap_face_many(
         logger.status("Using provided face_model as source.")
     else:
         logger.error("No source image or face_model provided; cannot proceed.")
-        return target_imgs
+        return target_imgs, [[] for _ in target_imgs], [[] for _ in target_imgs]
 
     if not source_faces:
         logger.status("No source faces detected.")
-        return target_imgs
+        return target_imgs, [[] for _ in target_imgs], [[] for _ in target_imgs]
 
     # Analyze all targets with caching
     target_faces_list = []
@@ -687,7 +708,7 @@ def swap_face_many(
 
     if not any(target_faces_list):
         logger.status("No faces detected in any target images.")
-        return target_imgs
+        return target_imgs, [[] for _ in target_imgs], [[] for _ in target_imgs]
 
     # Pick initial source face
     src_face, src_wrong_gender = get_face_single(
@@ -699,16 +720,20 @@ def swap_face_many(
     )
     if src_face is None or src_wrong_gender == 1:
         logger.status("Initial source face invalid or wrong gender.")
-        return target_imgs
+        return target_imgs, [[] for _ in target_imgs], [[] for _ in target_imgs]
 
     model_path = _resolve_model_path(model)
     face_swapper = getFaceSwapModel(model_path)
     if face_swapper is None:
         logger.error("Could not load model for multi swap: %s", model_path)
-        return target_imgs
+        return target_imgs, [[] for _ in target_imgs], [[] for _ in target_imgs]
 
     results = target_bgr_list
     src_face_idx = 0
+
+    # Per-image tracking
+    all_swapped_bboxes: List[List[List[float]]] = [[] for _ in results]
+    all_swapped_indices: List[List[int]] = [[] for _ in results]
 
     outer_pbar = progress_bar(len(faces_index) * len(results))
 
@@ -749,10 +774,13 @@ def swap_face_many(
 
             logger.status("Image %d: Swapping face index %d...", i, face_num)
 
+            swap_success = False
+
             if "hyperswap" in model:
                 swapped_256, M = safe_run_hyperswap(face_swapper, src_face, tgt_face, img_bgr)
                 if swapped_256 is not None:
                     img_bgr = paste_back(img_bgr, swapped_256, M, crop_size=256)
+                    swap_success = True
                 else:
                     logger.error("Image %d hyperswap returned None.", i)
             elif face_boost_enabled:
@@ -767,6 +795,7 @@ def swap_face_many(
                         else:
                             logger.warning("Image %d boost mode: M is None.", i)
                         img_bgr = swapper.in_swap(img_bgr, restored_face, M)
+                        swap_success = True
                     except Exception as e:
                         logger.error("Image %d boost restore/swap error: %s", i, e)
                 else:
@@ -775,14 +804,23 @@ def swap_face_many(
                 swapped_img, _M_unused = safe_faceswap_get(face_swapper, img_bgr, tgt_face, src_face)
                 if swapped_img is not None:
                     img_bgr = swapped_img
+                    swap_success = True
                 else:
                     logger.error("Image %d standard swap returned None.", i)
 
             results[i] = img_bgr
+            if swap_success:
+                try:
+                    bbox = list(getattr(tgt_face, "bbox", [])) if hasattr(tgt_face, "bbox") else []
+                    all_swapped_bboxes[i].append(bbox)
+                    all_swapped_indices[i].append(face_num)
+                except Exception as e:
+                    logger.debug("Image %d: failed to record bbox/index: %s", i, e)
             outer_pbar.update(1)
 
     progress_bar_reset(outer_pbar)
 
     final_images = [Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)) for bgr in results]
-    logger.debug("swap_face_many finished.")
-    return final_images
+    logger.debug("swap_face_many finished. Per-image swapped counts=%s",
+                 [len(x) for x in all_swapped_indices])
+    return final_images, all_swapped_bboxes, all_swapped_indices
