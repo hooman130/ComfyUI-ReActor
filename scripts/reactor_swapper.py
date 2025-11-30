@@ -450,8 +450,6 @@ def _prepare_source_image(source_img):
 def _pil_to_bgr(img: Image.Image) -> np.ndarray:
     return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 
-# ... existing imports and code above stay unchanged ...
-
 def swap_face(
     source_img: Union[Image.Image, str, None],
     target_img: Image.Image,
@@ -479,7 +477,6 @@ def swap_face(
 
     if model is None:
         logger.debug("No model provided; returning original target image.")
-        # Back-compat: return placeholders for bbox and swapped indexes
         return target_img, [], []
 
     source_img = _prepare_source_image(source_img)
@@ -497,6 +494,8 @@ def swap_face(
                 SOURCE_FACES = analyze_faces(source_bgr)
         source_faces = SOURCE_FACES
     elif face_model is not None:
+        # FIX: ensure source_bgr is defined when using a ready-made face model
+        source_bgr = target_bgr
         source_faces = [face_model]
         source_faces_index = [0]
         logger.status("Using provided face_model as source.")
@@ -608,11 +607,10 @@ def swap_face(
             if swapped_img is None:
                 logger.error("Standard swap: model returned None; skipping face.")
             else:
-                result = swapped_img  # paste already done internally for inswapper/reswapper
+                result = swapped_img
                 swap_success = True
 
         if swap_success:
-            # Track bbox and index for reporting
             try:
                 bbox = list(getattr(tgt_face, "bbox", [])) if hasattr(tgt_face, "bbox") else []
                 swapped_bboxes.append(bbox)
@@ -669,6 +667,8 @@ def swap_face_many(
                 SOURCE_FACES = analyze_faces(source_bgr)
         source_faces = SOURCE_FACES
     elif face_model is not None:
+        # FIX: ensure source_bgr is defined when using a ready-made face model
+        source_bgr = target_bgr_list[0] if len(target_bgr_list) > 0 else np.zeros((256, 256, 3), dtype=np.uint8)
         source_faces = [face_model]
         source_faces_index = [0]
         logger.status("Using provided face_model as source.")
@@ -712,7 +712,7 @@ def swap_face_many(
 
     # Pick initial source face
     src_face, src_wrong_gender = get_face_single(
-        source_bgr if source_img is not None else source_bgr,
+        source_bgr,
         source_faces,
         face_index=source_faces_index[0],
         gender_source=gender_source,
@@ -824,3 +824,6 @@ def swap_face_many(
     logger.debug("swap_face_many finished. Per-image swapped counts=%s",
                  [len(x) for x in all_swapped_indices])
     return final_images, all_swapped_bboxes, all_swapped_indices
+
+
+
